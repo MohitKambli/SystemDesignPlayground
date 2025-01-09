@@ -1,0 +1,153 @@
+1) How can you support large files?
+- The first thing you should consider when thinking about large files is the user experience. There are two key insights that should stick out and ultimately guide your design:
+    a) Progress Indicator: 
+        a.1) Users should be able to see the progress of their upload so that they know it's working and how long it will take.
+    b) Resumable Uploads: 
+        b.1) Users should be able to pause and resume uploads. 
+        b.2)If they lose their internet connection or close the browser, they should be able to pick up where they left off rather than redownloading the 49GB that may have already been uploaded before the interruption.
+- Before we go deep on solutions, let's take a moment to acknowledge the limitations that come with uploading a large file via a single POST request.
+    c) Timeouts:
+        c.1) Web servers and clients typically have timeout settings to prevent indefinite waiting for a response. A single POST request for a 50GB file could easily exceed these timeouts.
+        c.2) If we have a 50GB file and an internet connection of 100Mbps, how long will it take to upload the file? 50GB * 8 bits/byte / 100Mbps = 4000 seconds then 4000 seconds / 60 seconds/minute / 60 minutes/hour = 1.11 hours.
+        c.3) That's a long time to wait without any response from the server.
+    d) Browser & Server Limitation:
+        d.1) In most cases, it's not even possible to upload a 50GB file via a single POST request due to limitations configured in the browser or on the server.
+        d.2) Both browsers and web servers often impose limits on the size of a request payload.
+        d.3) For instance, popular web servers like Apache and NGINX have configurable limits, but the default is typically set to less than 2GB.
+        d.4) Most modern services, like Amazon API Gateway, have default limits that are much lower and cannot be increased. This is just 10MB in the case of Amazon API Gateway which we are using in our design.
+    e) Network Interruptions:
+        e.1) Large files are more susceptible to network interruptions.
+        e.2) If a user is uploading a 50GB file and their internet connection drops, they will have to start the upload from scratch.
+    f) User Experience:
+        f.1) Users are effectively blind to the progress of their upload. They have no idea how long it will take or if it's even working.
+- To address these limitations, we can use a technique called "chunking" to break the file into smaller pieces and upload them one at a time (or in parallel, depending on network bandwidth).
+- Chunking needs to be done on the client so that the file can be broken into pieces before it is sent to the server (or S3 in our case).
+- A very common mistake candidates make is to chunk the file on the server, which effectively defeats the purpose since you still upload the entire file at once to get it on the server in the first place.
+- When we chunk, we typically break the file into 5-10 MB pieces, but this can be adjusted based on the network conditions and the size of the file.
+- With chunks, it's rather straightforward for us to show a progress indicator to the user.
+- We can simply track the progress of each chunk and update the progress bar as each chunk is successfully uploaded.
+- This provides a much better user experience than the user simply staring at a spinning wheel for an hour.
+
+- The next question is: how will we handle resumable uploads?
+    - We need to keep track of which chunks have been uploaded and which haven't. We can do this by saving the state of the upload in the database, specifically in our FileMetadata table.
+    - Let's update the FileMetadata schema to include a chunks field.
+        {
+            "id": "123",
+            "name": "file.txt",
+            "size": 1000,
+            "mimeType": "text/plain",
+            "uploadedBy": "user1",
+            "status": "uploading",
+            "chunks": [
+                {
+                "id": "chunk1",
+                "status": "uploaded"
+                },
+                {
+                "id": "chunk2",
+                "status": "uploading"
+                },
+                {
+                "id": "chunk3",
+                "status": "not-uploaded"
+                }
+            ]
+        }
+    - When the user resumes the upload, we can check the chunks field to see which chunks have been uploaded and which haven't.
+    - We can then start uploading the chunks that haven't been uploaded yet.
+    - This way, the user doesn't have to start the upload from scratch if they lose their internet connection or close the browser.
+
+- But how should we ensure this chunks field is kept in sync with the actual chunks that have been uploaded?
+    - There are two approaches we can take:
+    a) Update based on client PATCH request
+        - The most obvious approach is to use the client to orchestrate chunk statuses. So the flow would look like:
+            a.1) The client takes the file, chunks it, and uploads the chunks directly to S3.
+            a.2) S3 responds to each chunk upload with a success message.
+            a.3) Upon success, the client sends a PATCH request to our backend to update the chunks field in the FileMetadata table.
+                PATCH /files/{fileId}/chunks
+                Request:
+                {
+                    "chunks": [
+                        {
+                        "id": "chunk1",
+                        "status": "uploaded"
+                        },
+                    ]
+                }
+        - The issue here is that we are trusting the client to keep the chunks field in sync with the actual chunks that have been uploaded which is a security risk.
+        - A malicious user could send a PATCH request to our backend to mark all of the chunks as uploaded without actually uploading them.
+        - While they'd only be able to corrupt their own file download in this case and not anyone else's, it is still a risk that can lead to an inconsistent state, which is difficult to debug.
+        - We can address this issue by using a server-side approach to ensure that the 'chunks' field stays in sync with the actual uploaded chunks.
+    b) Rely on S3 Event Notifications
+        - A better approach is to use S3 event notifications to keep the chunks field in sync with the actual chunks that have been uploaded.
+        - S3 event notifications are a feature of S3 that allow you to trigger a Lambda function or send a message to an SNS topic when a file is uploaded to S3.
+        - We can use this feature to send a message to our backend when a chunk is successfully uploaded and then update the chunks field in the FileMetadata table without relying on the client.
+
+- Next, let's talk about how to uniquely identify a file and a chunk.
+    - When you try to resume an upload, the very first question that should be asked is:
+        a) Have I tried to upload this file before?
+        b) If yes, which chunks have I already uploaded?
+    - To answer the first question, we cannot naively rely on the file name. This is because two different users (or even the same user) could upload files with the same name
+    - Instead, we need to rely on a unique identifier that is derived from the file's content. This is called a fingerprint.
+- A fingerprint is a mathematical calculation that generates a unique hash value based on the content of the file.
+- This hash value, often created using cryptographic hash functions like SHA-256, serves as a robust and unique identifier for the file regardless of its name or the source of the upload.
+- By computing this fingerprint, we can efficiently determine whether the file, or any portion of it, has been uploaded before.
+- For resumable uploads, the process involves not only fingerprinting the entire file but also generating fingerprints for each individual chunk.
+- This chunk-level fingerprinting allows the system to precisely identify which parts of the file have already been transmitted.
+- Taking a step back, we can tie it all together. Here is what will happen when a user uploads a large file:
+    a) The client will chunk the file into 5-10Mb pieces and calculate a fingerprint for each chunk. It will also calculate a fingerprint for the entire file, this becomes the fileId.
+    b) The client will send a GET request to fetch the FileMetadata for the file with the given fileId (fingerprint) in order to see if it already exists -- in which case, we can resume the upload.
+    c)  - If the file does not exist, the client will POST a request to /files/presigned-url to get a presigned URL for the file.
+        - The backend will save the file metadata in the FileMetadata table with a status of "uploading" and the chunks array will be a list of the chunk fingerprints with a status of "not-uploaded".
+    d)  - The client will then upload each chunk to S3 using the presigned URL.
+        - After each chunk is uploaded, S3 will send a message to our backend using S3 event notifications.
+        - Our backend will then update the chunks field in the FileMetadata table to mark the chunk as "uploaded".
+    e) Once all chunks in our chunks array are marked as "uploaded", the backend will update the FileMetadata table to mark the file as "uploaded".
+- All throughout this process, the client is responsible for keeping track of the progress of the upload and updating the user interface accordingly so the user knows how far in they are and how much longer it will take
+
+
+2) How can we make uploads, downloads, and syncing as fast as possible?
+- We've already touched on a few ways to speed up both download and upload respectively, but there is still more we can do to make the system as fast as possible.
+- To recap, for download we used a CDN to cache the file closer to the user. This made it so that the file doesn't have to travel as far to get to the user, reducing latency and speeding up download times.
+- For upload, chunking, beyond being useful for resumable uploads, also plays a significant role in speeding up the upload process.
+- While bandwidth is fixed (put another way, the pipe is only so big), we can use chunking to make the most of the bandwidth we have.
+- By sending multiple chunks in parallel, and utilizing adaptive chunk sizes based on network conditions, we can maximize the use of available bandwidth.
+- The same chunking approach can be used for syncing files - when a file changes, we can identify which chunks have changed and only sync those chunks rather than the entire file, making syncing much faster.
+- Beyond that which we've already discussed, we can also utilize compression to speed up both uploads and downloads.
+- Compression reduces the size of the file, which means fewer bytes need to be transferred.
+- We can compress a file on the client before uploading it and then decompress it on the server after it's uploaded.
+- We can also compress the file on the server before sending it to the client and then rely on the client to decompress it.
+- Compression is only useful if the speed gained from transferring fewer bytes outweighs the time it takes to compress and decompress the file.
+- For some file types, particularly media files like images and videos, the compression ratio is so low that it's not worth the time it takes to compress and decompress the file.
+- If you take a .png off your computer right now and compress it, you'll be lucky to have decreased the file size by more than a few percent -- so it's not worth it.
+- For text files, on the other hand, the compression ratio is much higher and, depending on network conditions, it may very well be worth it.
+- A 5GB text file could compress down to 1GB or even less depending on the content.
+- In the end, you'll want to implement logic on the client that decides whether or not to compress the file before uploading it based on the file type, size, and network conditions.
+
+
+3) How can you ensure file security?
+- Security is a critical aspect of any file storage system. We need to ensure that files are secure and only accessible to authorized users.
+    a) Encryption in Transit
+        - We should use HTTPS to encrypt the data as it's transferred between the client and the server.
+        - This is a standard practice and is supported by all modern web browsers.
+    b) Encryption at Rest
+        - We should also encrypt the files when they are stored in S3. This is a feature of S3 and is easy to enable.
+        - When a file is uploaded to S3, we can specify that it should be encrypted. S3 will then encrypt the file using a unique key and store the key separately from the file.
+        - This way, even if someone gains access to the file, they won't be able to decrypt it without the key.
+    c) Access Control
+        - Our shareList or separate share table/cache is our basic ACL. As discussed earlier, we make sure that we share download links only with authorized users.
+- But what happens if an authorized user shares a download link with an unauthorized user?
+- For example, an authorized user may, intentionally or unintentionally, post a download link to a public forum or social media and we need to make sure that unauthorized users cannot download the file.
+- This is where those signed URLs we talked about early come back into play.
+- When a user requests a download link, we generate a signed URL that is only valid for a short period of time (e.g. 5 minutes).
+- This signed URL is then sent to the user, who can use it to download the file.
+- If an unauthorized user gets a hold of the signed URL, they won't be able to use it to download the file because it will have expired.
+- They also work with modern CDNs like CloudFront and are a feature of S3. Here is how:
+    a) Generation:
+        a.1) A signed URL is generated on the server, including a signature that typically incorporates the URL path, an expiration timestamp, and possibly other restrictions (like IP address).
+        a.2) This signature is encrypted with a secret key known only to the content provider and the CDN.
+    b) Distribution:
+        b.1) The signed URL is distributed to an authorized user, who can use it to access the specified resource directly from the CDN.
+    c) Validation:
+        c.1) When the CDN receives a request with a signed URL, it checks the signature in the URL against the expected format and parameters, including verifying the expiration timestamp.
+        c.2) If the signature is valid and the URL has not expired, the CDN serves the requested content. If not, it denies access.

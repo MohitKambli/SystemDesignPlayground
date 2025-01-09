@@ -1,0 +1,165 @@
+High-Level Design
+1) Users should be able to upload files
+    - Metadata can be stored in a NoSQL database like DynamoDB.
+    - Our metadata is loosely structured, with few relations & main query pattern being to fetch files by user.
+    - This makes DynamoDB a solid choice.
+    FileMetadata Schema:
+        {
+            id,
+            name,
+            size,
+            mimeType,
+            uploadedBy,
+            s3Url, // link to the file in S3
+            status
+        }
+    a) Upload file to a single server
+        - Our "POST/files" endpoint will accept the file & metadata.
+        - Then store the file on server's local file system while saving the metadata in our database. However, this won't scale well and is not reliable.
+        - As the number of files grows, we will need to add more and more storage to our server and/or horizontally scale by adding more servers.
+        - If our server goes down, we lose access to all of our files.
+    b) Store file in a blob storage
+        - When a user uploads a file to our backend, we can send the file directly to Blob Storage (Amazon S3 or Google Cloud Storage) and store the metadata in our DynamoDB.
+        - If our server goes down, we don't lose access to our files.
+        - One challenge with this approach is that it's more complex. We need to integrate with the Blob Storage service and handle the case where the file is uploaded but the metadata is not saved. We also need to handle the case where the metadata is saved but the file is not uploaded.
+        - We can solve these issues by using a transactional approach where we only save the metadata if the file is successfully uploaded and vice versa.
+        - Second, this approach (as depicted above) requires that we technically upload a file twice -- once to our backend and once to Blob Storage. This is redundant.
+    c) Upload the file directly to blob storage (S3)
+        - This is faster and cheaper than uploading the file to our backend first.
+        - We can use presigned URLs to generate a URL that the user can use to upload the file directly to the Blob Storage service.
+        - Once the file is uploaded, the Blob Storage service will send a notification to our backend so we can save the metadata.
+        - Presigned URLs are URLs that give the user permission to upload a file to a specific location in the Blob Storage service. We can generate a presigned URL and send it to the user when they want to upload a file.
+        - So whereas our initial API for upload was a POST to /files, it will now be a three step process:
+            c.1) Request a pre-signed URL from our backend (which itself gets the URL from the Blob Storage service like S3) and save the file metadata in our database with a status of "uploading."
+                POST /files/presigned-url
+                Request:
+                {
+                    FileMetadata
+                }
+                Response:
+                {
+                    PresignedUrl
+                }
+            c.2) Use the presigned URL to upload the file to Blob Storage directly from the client. This is via a PUT request directly to the presigned URL where the file is the body of the request.
+            c.3) Once the file is uploaded, the Blob Storage service will send a notification to our backend using S3 Notifications. Our backend will then update the file metadata in our database with a status of "uploaded".
+
+2) Users should be able to download a file from any device
+    a) Download through File Server
+        - The most common solution candidates come up with is to download the file once from Blob Storage to our backend server and then once more from our backend to the client.
+        - Of course, the solution is suboptimal as we end up downloading the file twice, which is both slow and expensive.
+    b) Download from Blob Storage
+        - We can use presigned URLs to generate a URL that the user can use to download the file directly from Blob Storage.
+        - Like with uploading, the presigned url will give the user permission to download the file from a specific location in the Blob Storage service for a limited time.
+            b.1) Request a presigned download URL from our backend
+                GET /files/{fileId}/presigned-url
+                Response:
+                {
+                    PresignedUrl
+                }
+            b.2) Use the presigned URL to download the file from the Blob Storage service directly to the client.
+        - While nearly optimal, the main limitation is that this can still be slow for a large, geographically distributed user base.
+        - Your Blob Storage is located in a single region, so users far away from that region will have slower download times.
+    c) Download from CDN
+        - The best approach is to use a content delivery network (CDN) to cache the file closer to the user.
+        - A CDN is a network of servers distributed across the globe that cache files and serve them to users from the server closest to them. This reduces latency and speeds up download times.
+        - When a user requests a file, we can use the CDN to serve the file from the server closest to the user. This is much faster than serving the file from our backend or the Blob Storage service.
+        - For security, just like with our S3 presigned URLs, we can generate a URL that the user can use to download the file from the CDN.
+        - This URL will give the user permission to download the file from a specific location in the CDN for a limited time.
+        - CDNs are relatively expensive. To address this, it is common to be strategic about what files are cached and for how long.
+        - We can use a cache control header to specify how long the file should be cached in the CDN. We can also use a cache invalidation mechanism to remove files from the CDN when they are updated or deleted.
+        - This way, only files that are frequently accessed are cached and we don't waste money caching files that are rarely accessed.
+3) Users should be able to share a file with other users
+    a) Add a Sharelist to Metadata
+        - A good start is to simply add a list of users who have access to the file directly to the file metadata.
+        - When a user shares a file, we can add the user to the list.
+        - When a user downloads a file, we can check if they are in the list.
+        {
+            id,
+            name,
+            size,
+            mimeType,
+            uploadedBy,
+            shareList // This list will contain users to who the file is shared
+        }
+        - When a user opens our site they expect to see a list of all of their files and files that have been shared with them.
+        - Getting the list of their files is easy, especially since we will have uploadedBy as the primary key.
+        - But getting the list of files shared with them is slow with this approach. We would need to scan the sharelist of every file to see if the user is in it.
+    b) Caching to speed up fetching the sharelist
+        - A better approach is, in addition to the sharelist in the file metadata, to cache a list that maps the inverse relationship.
+        - This would be a mapping from any given user to the list of files shared with them.
+        - This way, when a user opens our site, we can quickly get the list of files shared with them by looking up their userId in our sharedFiles cache.
+        - Our cache entry would be a simple key-value pair like this: 
+            - user1:["fileId1", "fileId2"]
+        - We need to keep the sharedFiles list in sync with the sharelist in the file metadata.
+        - The best way to overcome this would be to just keep this user to file list mapping in the same database and update both the sharelist and sharedFiles list in a transaction.
+    c) Create a separate table for shares
+        - Another approach is to fully normalize the data.
+        - This would involve creating a new table that maps userId to fileId, where fileId is a file shared with the given user.
+        - This way, when a user opens our site, we can quickly get the list of files shared with them by querying the SharedFiles table for all of the files with a userId of the user.
+        - So you would create a new table, SharedFiles, that looks like this:
+            | userId (PK) | fileId (SK) |
+            |-------------|-------------|
+            | user1       | fileId1     |
+            | user1       | fileId2     |
+            | user2       | fileId3     |
+        - In this design, we no longer need the sharelist in the file metadata.
+        - We can simply query the SharedFiles table for all of the files that have a userId matching the requesting user, removing the need to keep the sharelist in sync with the sharedFiles list.
+        - This query is slightly less efficient than the previous approach since now we query using an index instead of a simple key-value lookup.
+        - However, the tradeoff may be worth it since we no longer need to keep the sharelist in sync with the sharedFiles list.
+4) Users can automatically sync files across devices
+    - At a high level, this works by keeping a copy of a particular file on each client device (locally) and also in remote storage (i.e., the "cloud").
+    - As such, there are two directions we need to sync in:
+        1) Local -> Remote
+        2) Remote -> Local
+    a) Local -> Remote
+    - When a user updates a file on their local machine, we need to sync these changes with the remote server.
+    - We consider the remote server to be the source of truth, so it's important that we get it consistent as soon as possible so that other local devices can know when there are changes they should pull in.
+    - To do this, we need a client-side sync agent that:
+        a.1) Monitors the local Dropbox folder for changes using OS-specific file system events (like FileSystemWatcher on Windows or FSEvents on macOS)
+        a.2) When it detects a change, it queues the modified file for upload locally
+        a.3) It then uses our upload API to send the changes to the server along with updated metadata
+        a.4) Conflicts are resolved using a "last write wins" strategy - meaning if two users edit the same file, the most recent edit will be the one that's saved
+    b) Remote -> Local
+    - For the other direction, each client needs to know when changes happen on the remote server so they can pull those changes down.
+    - There are two main approaches we could take:
+        b.1) Polling
+            - The client periodically asks the server "has anything changed since my last sync?"
+            - The server would query the DB to see if any files that this user is watching has a updatedAt timestamp that is newer than the last time they synced.
+            - This is simple but can be slow to detect changes and wastes bandwidth if nothing has changed.
+        b.2) WebSocket or SSE:
+            - The server maintains an open connection with each client and pushes notifications when changes occur.
+            - This is more complex but provides real-time updates.
+    - For Dropbox, we can use a hybrid approach. We can classify files into two categories:
+        b.3) Fresh files:
+            - Files that have been recently edited (within the last few hours). For these, we maintain a WebSocket connection to ensure near real-time sync.
+        b.4) Stale files:
+            - Files that haven't been modified in a while. For these, we can fall back to periodic polling since immediate updates are less critical.
+    - This hybrid approach gives us the best of both worlds - real-time updates for active files while conserving resources for inactive ones.
+Typing it all together:
+1) Uploader: 
+    - This is the client that uploads the file. 
+    - It could be a web browser, a mobile app, or a desktop app. 
+    - It is also responsible for proactively identifying local changes and pushing the updates to remote storage.
+2) Downloader: 
+    - This is the client that downloads the file. 
+    - Of course, this can be the same client as the uploader, but it doesn't have to be. 
+    - We separate them in our design for clarity. 
+    - It is also responsible for determining when a file it has locally has changed on the remote server and downloading these changes.
+3) LB & API Gateway: 
+    - This is the load balancer and API Gateway that sits in front of our application servers. 
+    - It's responsible for routing requests to the appropriate server and handling things like SSL termination, rate limiting, and request validation.
+4) File Service: 
+    - The file service is only responsible for writing to and from the file metadata db as well as requesting presigned URLs from S3. 
+    - It doesn't actually handle the file upload or download. 
+    - It's just a middleman between the client and S3.
+5) File Metadata DB: 
+    - This is where we store metadata about the files. 
+    - This includes things like the file name, size, MIME type, and the user who uploaded the file. 
+    - We also store a shared files table here that maps files to users who have access to them. 
+    - We use this table to enforce permissions when a user tries to download a file.
+6) S3: 
+    - This is where the files are actually stored. 
+    - We upload and download files directly to and from S3 using the presigned URLs we get from the file server.
+7) CDN: 
+    - This is a content delivery network that caches files close to the user to reduce latency. 
+    - We use the CDN to serve files to the downloader.
