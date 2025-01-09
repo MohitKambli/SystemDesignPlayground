@@ -1,0 +1,45 @@
+Requirements:-
+    Functional (Users should be able to):
+        1) Upload files
+        2) Download a file
+        3) Share a file with other users & view the files shared with them
+        4) Automatically sync files across devices
+    Non-Functional (System should):
+        1) Highly available (Availability >>> Consistency)
+        2) Support files as large as 50GB
+        3) Secure & Reliable (Files should be recoverable if lost or corrupted)
+        4) Low latency (Upload, Download, Sharing files should be done as fast as possible)
+
+Entities:-
+    1) File
+    2) FileMetadata
+    3) User
+
+APIs:-
+    1) Uploading files
+        POST /files
+        Request:
+        {
+            File,
+            FileMetadata
+        }
+    2) Downloading a file
+        GET /files/{fileId}
+        Response:
+        {
+            File,
+            FileMetadata
+        }
+    3) Share a file
+        POST /files/{fileId}/share
+        Request:
+        {
+            User[]  // Users to share file with
+        }
+    4) Sync files across devices
+        GET /files/{fileId}/changes
+        Response:
+        {
+            FileMetadata[]
+        }
+With each of these requests, user information will be passed in the headers (either via session token or JWT)
