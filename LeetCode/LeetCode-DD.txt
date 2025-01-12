@@ -1,0 +1,162 @@
+Potential Deep-Dives:
+1) How will the system support isolation and security when running user code?
+- By running our code in an isolated container, we've already taken a big step towards ensuring security and isolation.
+- But there are a few things we'll want to include in our container setup to further enhance security:
+    a) Read Only Filesystem:
+        - To prevent users from writing to the filesystem, we can mount the code directory as read-only and write any output to a temporary directory that is deleted a short time after completion.
+    b) CPU and Memory Bounds:
+        - To prevent users from consuming excessive resources, we can set CPU and memory limits on the container.
+        - If these limits are exceeded, the container will be killed, preventing resource exhaustion.
+    c) Explicit Timeout:
+        - To prevent users from running infinite loops, we can wrap the user's code in a timeout that kills the process if it runs for longer than a predefined time limit, say 5 seconds.
+        - This will also help us meet our requirement of returning submission results within 5 seconds.
+    d) Limit Network Access:
+        - To prevent users from making network requests, we can disable network access in the container, ensuring that users can't make any external calls.
+        - If working within the AWS ecosystem, we can use Virtual Private Cloud (VPC) Security Groups and NACLs to restrict all outbound and inbound traffic except for predefined, essential connections.
+    e) No System Calls (Seccomp):
+        - We don't want users to be able to make system calls that could compromise the host system.
+        - We can use seccomp to restrict the system calls that the container can make.
+
+---> NOTE <---
+Note that in an interview you're likely not expected to go into a ton of detail on how you'd implement each of these security measures. 
+Instead, focus on the high-level concepts and how they would help to secure the system. 
+If your interviewer is interested in a particular area, they'll ask you to dive deeper. 
+To be concrete, this means just saying, "We'd use docker containers while limiting network access, setting CPU and memory bounds, and enforcing a timeout on the code execution" is likely sufficient.
+---> NOTE <---
+
+2) How would you make fetching the leaderboard more efficient?
+- As we mentioned during our high-level design, our current approach is not going to cut it for fetching the leaderboard, it's far too inefficient.
+- Let's take a look at some other options:
+    a) Polling with Database Queries:
+        a.1) Approach:
+            - This is what we have now in the high-level design.
+            - We store all submission results in the main database.
+            - Clients poll the server every few seconds, and on each poll, the server queries the database for the top N users, sorts them, and returns the result.
+            - We'd then keep the data fresh by having the client poll every 5 seconds.
+            - While this works better if we switched to a relational database, it still has signifcant shortcomings.
+        a.2) Challenges:
+            - The main issues with this approach are the high database load due to frequent queries and increased latency as the number of users grows.
+            - It doesn't scale well for real-time updates, especially during competitions with many participants.
+            - As the system grows, this method would quickly become unsustainable, potentially leading to database overload and poor user experience.
+            - This approach would put an enormous strain on the database, potentially causing performance issues and increased latency.
+            - With each user poll triggering a query for a million records every 5 seconds, the database would struggle to keep up, especially during peak times or competitions.
+            - This frequent querying and sorting would also consume significant computational resources, making the system inefficient and potentially unstable under high load.
+    b) Caching with Periodic Updates:
+        b.1) Approach:
+            - To reduce the load on the database, we can introduce a cache (e.g., Redis) that stores the current leaderboard.
+            - The cache is updated periodically, say every 30 seconds, by querying the database
+            - When clients poll the server, we return the cached leaderboard instead of querying the database each time.
+        b.2) Challenges:
+            - While this approach reduces database load, it still has some limitations.
+            - Updates aren't truly real-time, and there's still polling involved, which isn't ideal for live updates.
+            - There's also a potential for race conditions if the cache update frequency is too low.
+            - However, this method is a significant improvement over the previous approach and could work well for smaller-scale competitions.
+    c) Redis Sorted Set with Periodic Polling:
+        c.1) Approach:
+            - This solution uses Redis sorted sets to maintain a real-time leaderboard while storing submission results in the main database.
+            - When a submission is processed, both the database and the Redis sorted set are updated.
+            - Clients poll the server every 5 seconds for leaderboard updates, and the server returns the top N users from the Redis sorted set which is wicked fast and requires no expensive database queries.
+            - Redis sorted sets are an in-memory data structure that allows us to efficiently store and retrieve data based on a score.
+            - This is perfect for our use case, as we can update the leaderboard by adding or removing users and their scores, and then retrieve the top N users with the highest scores.
+            - The Redis sorted set uses a key format like competition:leaderboard:{competitionId}, with the score being the user's total score or solve time, and the value being the userId.
+            - We'd implement an API endpoint like GET /competitions/:competitionId/leaderboard?top=100.
+            - When processing a submission, we'd update Redis with a command like ZADD competition:leaderboard:{competitionId} {score} {userId}.
+            - To retrieve the top N users, we'd use ZREVRANGE competition:leaderboard:{competitionId} 0 N-1 WITHSCORES.
+            - Then, when a user requests the leaderboard, we'll send them the first couple pages of results to display (maybe the top 1,000).
+            - Then, as they page via the client, we can fetch the next page of results from the server, updating the UI in the process.
+        c.2) Benefits:
+            - It's simpler to implement compared to WebSockets while still providing near real-time updates.
+            - The 5-second delay is generally acceptable for most users.
+            - It significantly reduces load on the main database and scales well for our expected user base.
+            - Of course, we could lower the polling frequency if needed as well, but 5 seconds is likely more than good enough given the relative infrequency of leaderboard updates.
+
+3) How would the system scale to support competitions with 100,000 users?
+- The main concern here is that we get a sudden spike in traffic, say from a competition or a popular problem, that could overwhelm the containers running the user code.
+- The reality is that 100k is still not a lot of users, and our API server, via horizontal scaling, should be able to handle this load without any issues.
+- However, given code execution is CPU intensive, we need to be careful about how we manage the containers.
+    a) Vertical Scaling:
+        a.1) Approach:
+            - The easiest option is to just run our containers on a larger instance type with more CPU and memory.
+            - This is known as vertical scaling and is the simplest way to increase the capacity of our system.
+            - This is a good time to do a bit of math.
+            - If we estimate a peak of 10k submission at a time (imagine its a competition) and each submission runs against ~100 test case. We are likely to become CPU bound very quickly.
+            - Let's make the assumption that each test case takes 100ms to run. This means that each submission will take 10s to run. If we have 10k submissions, that's 100k test cases, which will take 10k seconds to run.
+            - That's over 27 hours and we would need approximately 1,667 CPU cores to handle this load within one minute.
+            - This clearly indicates that vertical scaling alone, especially considering the limitations with current maximum AWS instance types like AWS's X1 having only 128 cores, is not a viable solution.
+            - Even if we could, it's not easy to vertically scale dynamically so we'd have a big expensive machine sitting around most of the time not doing much. Big waste of money!
+    b) Dynamic Horizontal Scaling:
+        b.1) Approach:
+            - We can horizontally scale each of the language specific containers to handle more submissions.
+            - This means that we can spin up multiple containers for each language and distribute submissions across them.
+            - This can be dynamically managed through auto-scaling groups that automatically adjust the number of active instances in response to current traffic demands, CPU utilization, or other memory metrics.
+            - In the case of AWS, we can use ECS to manage our containers and ECS Auto Scaling to automatically adjust the number of containers based on demand.
+        b.2) Challenges:
+            - The only considerable downside here is the risk of over-provisioning.
+            - If we spin up too many containers, we could end up wasting resources and incurring unnecessary costs.
+            - That said, modern cloud providers make it easy to scale up and down based on demand, so this is a manageable risk.
+    c) Horizontal Scaling with Queue:
+        c.1) Approach:
+            - We can take the same exact approach as above but add a queue between the API server and the containers.
+            - This will allow us to buffer submissions during peak times and ensure that we don't overwhelm the containers.
+            - We can use a managed queue service like SQS to handle this for us.
+            - When a user submits their code, the API server will add the submission to the queue and the containers will pull submissions off the queue as they become available.
+            - This will help us manage the load on the containers and ensure that we don't lose any submissions during peak times.
+            - Once our worker gets the results, it will notify the App Server so it can update both the database and the cache simultaneously.
+            - One important thing to note is that the introduction of the queue has made the system asynchronous.
+            - This means that the API server will no longer be able to return the results of the submission immediately.
+            - Instead, the user will need to poll the server for the results.
+            - We introduce a new endpoint, say GET /check/:id, that is polled every second by the client to check if the submission has been processed.
+            - It simply looks up the submission in the database and returns the results if they are available or returns a "processing" message if not.
+            - Some candidates try to introduce a persistent connection like WebSockets to avoid polling.
+            - This could certainly work, but it adds complexity to the system and is likely not necessary given the polling interval is only a second.
+            - Fun fact, this is exactly what LeetCode does when you submit a solution to a problem.
+        c.2) Challenges:
+            - There could be a really strong case made that this is overengineering and adding unecessary complexity.
+            - Given the scale of the system, it's likely that we could handle the load without the need for a queue and if we require users to register for competitions, we would have a good sense of when to expect peak traffic and could scale up the containers in advance.
+- While the addition of the queue is likely overkill from a volume perspective, I would still opt for this approach with my main justification being that it also enables retries in the event of a container failure.
+- This is a nice to have feature that could be useful in the event of a container crash or other issue that prevents the code from running successfully.
+- We'd simply requeue the submission and try again.
+- Also, having that buffer could help you sleep at night knowing you're not going to lose any submissions, even in the event of a sudden spike in traffic (which I would not anticipate happening in this system).
+
+4) How would the system handle running test cases?
+- One follow up question I like to ask is, "How would you actually do this? How would you take test cases and run them against user code of any language?" This breaks candidates out of "box drawing mode" and forces them to think about the actual implementation of their design.
+- You definetely don't want to have to write a set of test cases for each problem in each language. That would be a nightmare to maintain.
+- Instead, you'd write a single set of test cases per problem which can be run against any language.
+- To do this, you'll need a standard way to serialize the input and output of each test case and a test harness for each language which can deserialize these inputs, pass them to the user's code, and compare the output to the deserialized expected output.
+- For example, lets consider a simple question that asks the maximum depth of a binary tree.
+- Using Python as our example, we can see that the function itself takes in a TreeNode object.
+    # Definition for a binary tree node.
+    # class TreeNode(object):
+    #     def __init__(self, val=0, left=None, right=None):
+    #         self.val = val
+    #         self.left = left
+    #         self.right = right
+    class Solution(object):
+        def maxDepth(self, root):
+            """
+            :type root: TreeNode
+            :rtype: int
+            """
+- To actually run this code, we would need to have a TreeNode file that exists in the same directory as the user's code in the container.
+- We would take the standardized, serialized input for the test case, deserialize it into a TreeNode object, and pass it to the user's code.
+- The test case could look something like:
+    {
+        "id": 1,
+        "title": "Max Depth of Binary Tree",
+        ...
+        "testCases": [
+            {
+                "type": "tree",
+                "input": [3,9,20,null,null,15,7],
+                "output": 3
+            },
+            {
+                "type": "tree",
+                "input": [1,null,2],
+                "output": 2
+            }
+        ]
+    }
+- For a Tree object, we've decided to serialize it into an array using inorder traversal.
+- Each language will have it's own version of a TreeNode class that can deserialize this array into a TreeNode object to pass to the user's code.
+- We'd need to define the serialization strategy for each data structure and ensure that the test harness for each language can deserialize the input and compare the output to the expected output.
