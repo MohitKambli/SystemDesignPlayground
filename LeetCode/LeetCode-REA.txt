@@ -1,0 +1,49 @@
+Requirements:-
+    Functional (Users should be able to):
+        1) View list of coding problems
+        2) View given problem & code solution using multiple languages
+        3) Submit their solution & get instant feedback
+        4) View a live leaderboard for competitions
+    Non-Functional (System should):
+        1) Availability >>> Consistency (prioritize availability over consistency)
+        2) Support isolation & security when running user code
+        3) Low latency (return submission results within 5 seconds)
+        4) Scalability (scalable to support competitions for 100,000 users)
+
+Entities:-
+    1) Problem - Problem statement, test cases & expected output
+    2) Submission - User's code submission & result of running code against the test cases
+    3) Leaderboard - Leaderboard for competitions
+
+APIs:-
+    1) Viewing list of coding problems:
+        GET /problems?page=1&limit=100
+        Response:
+        {
+            Partial<Problem>[]
+        }
+    2) Viewing a specific problem:
+        GET /problem/:id?language={language}
+        Response:
+        {
+            Problem
+        }
+    3) Submit solution to a problem:
+        POST /problem/:id/submit
+        Request:
+        {
+            code: string,
+            language: string
+        }
+        Response:
+        {
+            Submission
+        }
+    4) View live leaderboard for competition
+        GET /leaderboard/:competitionId?page=1&limit=100
+        Response:
+        {
+            Leaderboard
+        }
+
+With each of these requests, user information will be passed in the headers (either via session token or JWT)
