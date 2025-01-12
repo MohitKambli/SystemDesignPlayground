@@ -1,0 +1,119 @@
+High-Level Design
+1) Users should be able to view a list of coding problems
+- To view a list of problems, we'll need a simple server that can fetch a list of problems from the database and return them to the user. This server will also be responsible for handling pagination.
+- The core components here are:
+    a) API Server: 
+        - This server will handle incoming requests from the client and return the appropriate data
+    b) Database: 
+        - This is where we'll store all of our problems. We'll need to make sure that the database is indexed properly to support pagination.
+        - While either a SQL or NoSQL database could work here, I'm going to choose a NoSQL DB like DynamoDB because we don't need complex queries and I plan to nest the test cases as a subdocument in the problem entity.
+- Problem Schema:
+{
+  id: string,
+  title: string,
+  question: string,
+  level: string,
+  tags: string[],
+  codeStubs: {
+    python: string,
+    javascript: string,
+    typescript: string,
+    ...
+  },
+  testCases: {
+    type: string,
+    input: string,
+    output: string
+  }[]
+}
+- The codeStubs for each language would either need to be manually entered by an admin or, in the modern day of LLMs, could be generated automatically given a single language example.
+
+
+2) Users should be able to view a given problem and code a solution using multiple languages
+- To view a problem, the client will make a request to the API server with GET /problems/:id and the server will return the full problem statement and code stub after fetching it from the database.
+- We'll use a Monaco Editor to allow users to code their solution in the browser.
+
+3) Users should be able to submit their solution & get instant feedback
+- When a user submits their solution, we need to run their code against the test cases and return the result.
+- This is where we need to be careful about how we run the code to ensure that it doesn't crash our server or compromise our system.
+- Let's breakdown some options for code execution:
+    a) Run code in the API Server:
+        - The simplest way to run the user submitted code is to run it directly in the API server.
+        - This means saving the code to a file in our local filesystem, running it, and capturing the output.
+        a.1) Security:
+            - Running user code on your server is a massive security risk.
+            - If a user submits malicious code, they could potentially take down your server or compromise your system.
+            - Consider a user submitting code that deletes all of your data or sends all of your data to a third party.
+            - They could also use your server to mine cryptocurrency, launch DDoS attacks, or any number of other malicious activities.
+        a.2) Performance:
+            - Running code is CPU intensive and can easily crash your server if not properly managed, especially if the code is in an infinite loop or has a memory leak.
+        a.3) Isolation:
+            - Running code in the same process as your API server means that if the code crashes, it will take down your server with it and no other requests will be able to be processed.
+    b) Run code in a Virtual Machine (VM):
+        b.1) Approach:
+            - A better way to run user submitted code is to run it in a virtual machine (VM) on the physical API Server.
+            - A VM is an isolated environment that runs on top of your server and can be easily reset if something goes wrong.
+            - This means that even if the user's code crashes the VM, it won't affect your server or other users.
+        b.2) Challenges:
+            - The main challenge with this approach is that VMs are resource intensive and can be slow to start up.
+            - This means that you'll need to carefully manage your VMs to ensure that you're not wasting resources and that you can quickly spin up new VMs as needed.
+            - Additionally, you'll need to be careful about how you manage the lifecycle of your VMs to ensure that you're not running out of resources or leaving VMs running when they're not needed which can prove costly.
+    c) Run code in a Container (Docker):
+        c.1) Approach:
+            - A great (and arguably optimal) solution is to run user submitted code in a container.
+            - Containers are similar to VMs in that they provide an isolated environment for running code, but they are much more lightweight and faster to start up.
+            - Let's break down the key differences between VMs and containers:
+        c.2) VMs:
+            - VMs run on physical hardware through a hypervisor (like VMware or Hyper-V).
+            - Each VM includes a full copy of an operating system (OS), the application, necessary binaries, and libraries, making them larger in size and slower to start.
+            - VMs are fully isolated, running an entire OS stack, which adds overhead but provides strong isolation and security.
+        c.2) Containers:
+            - Containers, on the other hand, share the host system's kernel and isolate the application processes from each other.
+            - They include the application and its dependencies (libraries, binaries) but not a full OS, making them lightweight and enabling faster start times.
+            - Containers offer less isolation than VMs but are more efficient in terms of resource usage and scalability.
+            - We would create a container for each runtime that we support (e.g. Python, JavaScript, Java) that installs the necessary dependencies and runs the code in a sandboxed environment.
+            - Rather than spinning up a new VM for each user submission, we can reuse the same containers for multiple submissions, reducing resource usage and improving performance.
+        c.3) Challenges:
+            - Given that containers share the host OS kernel, we need to properly configure and secure the containers to prevent users from breaking out of the container and accessing the host system.
+            - We also need to enforce resource limits to prevent any single submission from utilizing excessive system resources and affecting other users.
+    d) Run code in a Serveless Function:
+        d.1) Approach:
+            - Another great option is to run user submitted code in a serverless function.
+            - Serverless functions are small, stateless, event-driven functions that run in response to triggers (e.g. an HTTP request).
+            - They are managed by a cloud provider and automatically scale up or down based on demand, making them a great option for running code that is CPU intensive or unpredictable in terms of load.
+            - In this approach, we would create a serverless function for each runtime that we support (e.g. Python, JavaScript, Java) that installs the necessary dependencies and runs the code in a sandboxed environment.
+            - When a user submits their code, we would trigger the appropriate serverless function to run the code and return the result.
+        d.2) Challenges:
+            - The main challenge with this approach is that serverless functions have a cold start time, which can introduce latency for the first request to a function.
+            - Additionally, serverless functions have resource limits that can impact the performance of long running or resource intensive code.
+            - We would need to carefully manage these limits to ensure that we're not running out of resources or hitting performance bottlenecks.
+- While Serverless (lambda) functions are a great option, I am going to proceed with the container approach given I don't anticipate a significant variance in submission volume and I'd like to avoid any cold start latency.
+- So with our decision made, let's update our high-level design to include a container service that will run the user's code and break down the flow of data through the system.
+- When a user makes a submission, our system will:
+    -> The API Server will recieve the user's code submission and problem ID and send it to the appropriate container for the language specified.
+    -> The isolated container runs the user's code in a sandboxed environment and returns the result to the API server.
+    -> The API Server will then store the submission results in the database and return the results to the client.
+
+4) Users should be able to view a live leaderboard for competitions
+- First, we should define a competition. We will define them as:
+    -> 90 minutes long
+    -> 10 problems
+    -> Up to 100k users
+    -> Scoring is the number of problems solved in the 90 minutes. In case of tie, we'll rank by the time it took to complete all 10 problems (starting from competition start time).
+- The easiest thing we can do when users request the leaderboard via /leaderboard/:competitionId is to query the submission table for all items/rows with the competitionId and then group by userId, ordering by the number of successful submissions.
+- In a SQL database, this would be a query like:
+    SELECT userId, COUNT(*) as numSuccessfulSubmissions
+    FROM submissions
+    WHERE competitionId = :competitionId AND passed = true
+    GROUP BY userId
+    ORDER BY numSuccessfulSubmissions DESC
+- In a NoSQL DB like DynamoDB, you'd need to have the partition key be the competitionId. 
+- Then you'd pull all items into memory and group and sort.
+- Once we have the leaderboard, we'll pass it back to the client to display.
+- In order to make sure it's fresh, the client will need to request the leaderboard again after every ~5 seconds or so.
+- Tying it all together:
+    -> User requests the leaderboard via /leaderboard/:competitionId
+    -> The API server initiates a query to the submission table in our database to get all successful submissions for the competition.
+    -> Whether via the query itself, or in memory, we'll create the leaderboard by ranking users by the number of successful submissions.
+    -> Return the leaderboard to the client.
+    -> The client will request the leaderboard again after 5 seconds so ensure it is up to date.
