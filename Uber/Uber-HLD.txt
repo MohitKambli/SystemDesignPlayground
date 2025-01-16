@@ -1,0 +1,74 @@
+High-Level Design
+1) Riders should be able to input a start location and a destination and get an estimated fare
+- The first thing that users will do when they open the app to request a ride is search for their desired destination.
+- At this point, the client will make a request to our service to get an estimated price for the ride.
+- The user will then have a chance to request a ride with this fare or do nothing.
+- The core components necessary to fulfill fare estimation are:
+    a) Rider Client:
+        - The primary touchpoint for users is the Rider Client, available on iOS and Android.
+        - This client interfaces with the system's backend services to provide a seamless user experience.
+    b) API Gateway:
+        - Acting as the entry point for client requests, the API Gateway routes requests to the appropriate microservices.
+        - It also manages cross-cutting concerns such as authentication and rate limiting.
+    c) Ride Service:
+        - This microservice is tasked with managing ride state, starting with calculating fare estimates.
+        - It interacts with third-party mapping APIs to determine the distance and travel time between locations and applies the company's pricing model to generate a fare estimate.
+        - For the sake of this interview, we abstract this complexity away.
+    d) Third Party Mapping API:
+        - We use a third-party service (like Google Maps) to provide mapping and routing functionality.
+        - It is used by the Ride Service to calculate the distance and travel time between locations.
+    e) Database:
+        - The database is, so far, responsible for storing Fare entities.
+        - In this case, it creates a fare with information about the price, eta, etc.
+- Let's walk through exactly how these component interact when a rider requests a fare estimate.
+    a) The rider enters their pickup location and desired destination into the client app, which sends a POST request to our backend system via /fare
+    b) The API gateway receives the request and handles any necessary authentication and rate limiting before forwarding the request to the Ride Service.
+    c) The Ride Service makes a request to the Third Party Mapping API to calculate the distance and travel time between the pickup and destination locations and then applies the company's pricing model to the distance and travel time to generate a fare estimate.
+    d) The Ride Service creates a new Fare entity in the Database with the details about the estimated fare.
+    e) The service then returns the Fare entity to the API Gateway, which forwards it to the Rider Client so they can make a decision about whether accept the fare and request a ride.
+
+2) Riders should be able to request a ride based on the estimated fare
+- Once a user reviews the estimated fare and ETA, they can request a ride.
+- By building upon our existing design, we can extend it to support ride requests pretty easily.
+- We don't need to add any new entities at all, we just need to add a Ride table to our Database.
+- Then, when a request comes in, this is how we handle it.
+    a) The user confirms their ride request in the client app, which sends a POST request to our backend system with the id of the Fare they are accepting.
+    b) The API gateway performs necessary authentication and rate limiting before forwarding the request to the Ride Service.
+    c) The Ride Service receives the request and creates a new entry in the Ride table, linking to the relevant Fare that was accepted, and initializing the Ride's status as requested.
+    d) Next, it triggers the matching flow so that we can assign a driver to the ride.
+
+3) Upon request, riders should be matched with a driver who is nearby and available
+- Now we need to introduce some new components in order to facilitate driver matching.
+    a) Driver Client:
+        - In addition to the Rider Client, we introduce the Driver Client, which is the interface for drivers to receive ride requests and provide location updates.
+        - The Driver Client communicates with the Location Service to send real-time location updates.
+    b) Location Service:
+        - Manages the real-time location data of drivers.
+        - It is responsible for receiving location updates from drivers, storing this information in the database, and providing the Ride Matching Service with the latest location data to facilitate accurate and efficient driver matching.
+    c) Ride Matching Service:
+        - Handles incoming ride requests and utilizes a sophisticated algorithm (abstracted away for the purpose of this interview) to match these requests with the best available drivers based on proximity, availability, driver rating, and other relevant factors.
+- Let's walk through the sequence of events that occur when a user requests a ride and the system matches them with a nearby driver:
+    a) The user confirms their ride request in the client app, which sends a POST request to our backend system with the ID of the fare they are accepting.
+    b) The API gateway performs necessary authentication and rate limiting before forwarding the request to the Ride Matching Service.
+    c) We create a ride object as mentioned above, and then we trigger the matching workflow
+    d) Meanwhile, at all times, drivers are sending their current location to the location service, and we are updating our database with their latest location lat & long so we know where they are.
+    e) The matching workflow then uses these updated locations to query for the closest available drivers in an attempt to find an optimal match.
+
+4) Drivers should be able to accept/decline a request and navigate to pickup/drop-off
+- Once a driver is matched with a rider, they can accept the ride request and navigate to the pickup location.
+- We only need to add one additional service to our existing design.
+    a) Notification Service:
+        - Responsible for dispatching real-time notifications to drivers when a new ride request is matched to them.
+        - It ensures that drivers are promptly informed so they can accept ride requests in a timely manner, thus maintaining a fluid user experience.
+        - Notifications are sent via APN (Apple Push Notification) and FCM (Firebase Cloud Messaging) for iOS and Android devices, respectively.
+- Let's walk through the sequence of events that occur when a driver accepts a ride request and completes the ride:
+    a) After the Ride Matching Service determines the ranked list of eligible drivers, it sends a notification to the top driver on the list via APN or FCM.
+    b) 
+        - The driver receives a notification that a new ride request is available.
+        - They open the Driver Client app and accept the ride request, which sends a PATCH request to our backend system with the rideID.
+        - If they decline the ride instead, the system will send a notification to the next driver on the list.
+    c) The API gateway receives the requests and routes it to the Ride Service.
+    d) 
+        - The Ride Service receives the request and updates the status of the ride to "accepted" and updates the assigned driver accordingly.
+        - It then returns the pickup location coordinates to the Driver Client.
+    e) With the coordinates in hand, the Driver uses on client GPS to navigate to the pickup location.
