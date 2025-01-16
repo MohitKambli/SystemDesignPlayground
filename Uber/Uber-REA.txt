@@ -1,0 +1,87 @@
+Requirements:-
+    Functional:
+        1) Riders should be able to input source & destination and get fare estimate
+        2) Riders should be able to request ride based on the estimated fare
+        3) Upon request, riders should be matched with a driver who is nearby and available
+        4) Drivers should be able to accept/decline a request and navigate to pickup/drop-off
+    Non-Functional:
+        1) System should prioritize low latency matching (<1 minute to match or failure)
+        2) System should ensure strong consistency in ride matching to prevent any driver from being assigned multiple rides simultaneously
+        3) System should be able to handle high throughput, especially during peak hours or special events
+
+Entities:-
+    1) Rider:
+        - This is any user who uses the platform to request rides.
+        - It includes personal information such as name and contact details, preferred payment methods for ride transactions, etc.
+    2) Fare:
+        - This entity represents an estimated fare for a ride.
+        - It includes the pickup and destination locations, the estimated fare, and the estimated time of arrival.
+        - This could also just be put on the ride object, but we'll keep it separate for now but there is no right or wrong answer here.
+    3) Driver:
+        - This is any users who are registered as drivers on the platform and provide transportation services.
+        - It has their personal details, vehicle information (make, model, year, etc.), and preferences, and availability status.
+    4) Location:
+        - This entity stores the real-time location of drivers.
+        - It includes the latitude and longitude coordinates, as well as the timestamp of the last update.
+        - This entity is crucial for matching riders with nearby drivers and for tracking the progress of a ride.
+    5) Ride:
+        - This entity represents an individual ride from the moment a rider requests an estimated fare all the way until its completion.
+        - It records all pertinent details of the ride, including the identities of the rider and the driver, vehicle details, state, the planned route, the actual fare charged at the end of the trip, and timestamps marking the pickup and drop-off.
+
+APIs:-
+    1) Retrieve fare estimate for source and destination inputs:
+        - We define a simple POST endpoint that takes in the user's current location and desired destination and returns a Fare object with the estimated fare and eta.
+        - We use POST here because we will be creating a new ride object in the database.
+        POST /fare:
+        Request:
+        {
+            source,
+            destination
+        }
+        Response:
+        {
+            Fare
+        }
+    
+    2) Request Ride Endpoint:
+        - This endpoint is used by riders to confirm their ride request after reviewing the estimated fare.
+        - It initiates the ride matching process by signaling the backend to find a suitable driver, thus creating a new ride object.
+        POST /rides:
+        Request:
+        {
+            fareId
+        }
+        Response:
+        {
+            Ride
+        }
+    
+    3) Update Driver Location Endpoint:
+        - Before we can do any matching, we need to know where our drivers are
+        - This endpoint is used by drivers to update their location in real-time.
+        - It is called periodically by the driver client to ensure that the driver's location is always up to date.
+        POST /drivers/location:
+        Request:
+        {
+            lat,
+            long
+        }
+        Response:
+        {
+            Success/Error
+        }
+    
+    4) Accept Ride Request Endpoint:
+        - This endpoint allows drivers to accept a ride request.
+        - Upon acceptance, the system updates the ride status and provides the driver with the pickup location coordinates.
+        PATCH /rides/rideId:
+        Request:
+        {
+            Accept/Deny
+        }
+        Response:
+        {
+            Ride
+        }        
+
+With each of these requests, rider/driver information will be passed in the headers (either via session token or JWT)
