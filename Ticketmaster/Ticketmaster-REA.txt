@@ -1,0 +1,58 @@
+Requirements:-
+    Functional (Users should be able to):
+        1) View events
+        2) Search for events
+        3) Book tickets to events
+    Non-Functional (System should):
+        1) Prioritize availability for searching & viewing events, but should prioritize consistency for booking events (no double booking)
+        2) Be scalable and able to handle high throughput in the form of popular events (10 million users, one event)
+        3) Have low latency search (< 500ms)
+        4) Be able to support high read throughput (100:1)
+
+Entities:-
+    1) Ticket
+        - Contains information related to individual tickets for events.
+        - This includes attributes such as the associated event ID, seat details (like section, row, and seat number), pricing, and status (available or sold).
+    2) Event
+        - This entity stores essential information about an event, including details like the date, description, type, and the performer or team involved.
+        - It acts as the central point of information for each unique event.
+    3) Venue
+        - Represents the physical location where an event is held.
+        - Each venue entity includes details such as address, capacity, and a specific seat map, providing a layout of seating arrangements unique to the venue.
+    4) User
+        - Represents the individual interacting with the system.
+    5) Performer
+        - Represents the individual or group performing or participating in the event.
+        - Key attributes for this entity include the performer's name, a brief description, and potentially links to their work or profiles.
+        - (Note: this could be artist, company, collective — a lot of different entities. The choice of “performer” is intending to be general enough to cover all possible groups)
+    6) Booking
+        - Records the details of a user's ticket purchase.
+        - It typically includes the user ID, a list of ticket IDs being booked, total price, and booking status (such as in-progress or confirmed).
+        - This entity is key in managing the transaction aspect of the ticket purchasing process.
+APIs:-
+    1) View events (We create a simple GET endpoint that takes in an eventId and return the details of that event)
+        GET /events/:eventId
+        Response:
+        {
+            Event & Venue & Performer & Ticket[]
+        }
+        - Tickets are to render the seat map on the Client
+    2) Search for events (We just need a single GET endpoint that takes in a set of search parameters and returns a list of events that match those parameters)
+        GET /events/search?keyword={keyword}&start={start_date}&end={end_date}&pageSize={page_size}&page={page_number}
+        Response:
+        {
+            Event[]
+        }
+    3) Purchase/Book tickets to events (We have a post endpoint that takes the list of tickets and payment details in the message body and returns a bookingId)
+        POST /bookings/:eventId
+        Request:
+        {
+            ticketIds,
+            paymentDetails
+        }
+        Response:
+        {
+            bookingId
+        }
+
+With each of these requests, user information will be passed in the headers (either via session token or JWT)
