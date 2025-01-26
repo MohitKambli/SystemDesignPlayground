@@ -1,0 +1,74 @@
+High-Level Design
+1) Users should be able to view events
+- When a user navigates to www.yourticketmaster.com/event/:eventId they should see details about that event.
+- Crucially, this should include a seatmap showing seat availability.
+- The page will also display the event's name, along with a description.
+- Key information such as the location (including venue details), event dates, and facts about the performers or teams involved could be outlined.
+- We start by laying out the core components for communicating between the client and our microservices.
+- We add our first service, "Event Service," which connects to a database that stores the event, venue, and performer data outlined in the Core Entities above.
+- This service will handle the reading/viewing of events.
+    a) Clients:
+        - Users will interact with the system through the clients website or app.
+        - All client requests will be routed to the system's backend through an API Gateway.
+    b) API Gateway:
+        - This serves as an entry point for clients to access the different microservices of the system.
+        - It's primarily responsible for routing requests to the appropriate services but can also be configured to handle cross-cutting concerns like authentication, rate limiting, and logging.
+    c) Event Service:
+        - Our first microservice is responsible for handling view API requests by fetching the necessary event, venue, and performer information from the database and returning the results to the client.
+    d) Events DB:
+        - Stores tables for events, performers, and venues.
+- Let's walk through exactly what happens when a user makes a request to www.yourticketmaster.com/event/:eventId to view an event.
+    a) The client makes a REST GET request with the eventId
+    b) The API gateway then forwards the request onto our Event Service.
+    c) The Event Service then queries the Events DB for the event, venue, and performer information and returns it to the client.
+
+2) Users should be able to search for events
+- When users first open your site, they expect to be able to search for upcoming events.
+- This search will be parameterized based on any combination of keywords, artists/teams, location, date, or event type.
+- Let’s start with the most basic thing you could do - we'll create a simple service which accepts search queries.
+- This service will connect your DB and query it by filtering for the fields in the API request.
+- This has issues, but it’s a good starting point.
+- We will dig into better options in the deep dives below.
+- When a user makes a search request, it's straightforward:
+    a) The client makes a REST GET request with the search parameters
+    b) Our load balancer accepts the request and routes it to the API gateway with the fewest current connections.
+    c) The API gateway then, after handling basic authentication and rate limiting, forward the request onto our Search Service.
+    d) The Search Service then queries the Events DB for the events matching the search parameters and returns them to the client.
+
+3) Users should be able to book tickets to events
+- The main thing we are trying to avoid is two (or more) users paying for the same ticket.
+- That would make for an awkward situation at the event!
+- To handle this consistency issue, we need to select a database that supports transactions.
+- This will allow us to ensure that only one user can book a ticket at a time.
+- While anything from MySQL to DynamoDB would be fine choices (just needs ACID properties), we'll opt for PostgreSQL.
+- Additionally, we need to implement proper isolation levels and either row-level locking or Optimistic Concurrency Control (OCC) to fully prevent double bookings.
+a) New Tables in Events DB:
+    - First we add two new tables to our database, Bookings and Tickets.
+    - The Bookings table will store the details of each booking, including the user ID, ticket IDs, total price, and booking status.
+    - The Tickets table will store the details of each ticket, including the event ID, seat details, pricing, and status.
+    - The Tickets table will also have a bookingId column that links it to the Bookings table.
+b) Booking Service:
+    - This microservice is responsible for the core functionality of the ticket booking process.
+    - It interacts with databases that store data on bookings and tickets.
+        b.1) 
+            - It interfaces with the Payment Processor (Stripe) for transactions.
+            - Once a payment is confirmed, the booking service updates the ticket status to "sold".
+        b.2) 
+            - It communicates with the Bookings and Tickets tables to fetch, update, or store relevant data.
+c) Payment Processor (Stripe):
+    - An external service responsible for handling payment transactions.
+    - Once a payment is processed, it notifies the booking service of the transaction status.
+- When a user goes to book a ticket, the following happens:
+    a) The user is redirected to a booking page where they can provide their payment details and confirm the booking.
+    b) Upon confirmation, a POST request is sent to the /bookings endpoint with the selected ticket IDs.
+    c) The booking server initiates a transaction to:
+        - Check the availability of the selected tickets.
+        - Update the status of the selected tickets to “booked”.
+        - Create a new booking record in the Bookings table.
+    d) 
+        - If the transaction is successful, the booking server returns a success response to the client.
+        - Otherwise, if the transaction failed because another user booked the ticket in the meantime, the server returns a failure response and we pass this information back to the client.
+- You may have noticed there is a fundamental issue with this design.
+- Users can get to the booking page, type in their payment details, and then find out that the ticket they wanted is no longer available.
+- This would suck and is something that we are going to discuss how to avoid later on in our deep dives
+- For now, we have a simple implementation that meets the functional requirement.
